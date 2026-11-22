@@ -427,6 +427,21 @@ button.row.card{border:1px solid var(--line);padding:12px;background:var(--surfa
 .center p{margin:0;max-width:34ch}
 .count small a{color:inherit}
 .leaflet-pane,.leaflet-top,.leaflet-bottom{z-index:1}
+
+/* ---------- Lista como tarjetas separadas + detalle ---------- */
+.plist{background:none;border:0;border-radius:0;overflow:visible;display:flex;flex-direction:column;gap:12px;margin-top:12px}
+.post,.rec{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:14px}
+.post.lost{border-color:var(--lost-fg)}
+.post.oficial{border-color:var(--accent)}
+.clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.post[data-open],.rec[data-open]{cursor:pointer}
+.post[data-open]:active,.rec[data-open]:active{background:var(--surface-2)}
+.act.open{margin-left:auto;color:var(--accent);font-weight:800;padding:7px 2px}
+.plist .empty{background:var(--surface);border:1px solid var(--line);border-radius:18px}
+#detalle{padding-top:16px;padding-bottom:24px}
+#detalle .post,#detalle .rec{padding:0;border:0;background:none;border-radius:0}
+#detalle h3{font-size:21px}
+#detalle .msgs,#detalle .note{margin:0}
 </style>
 </head>
 <body>
@@ -530,6 +545,7 @@ button.row.card{border:1px solid var(--line);padding:12px;background:var(--surfa
       <aside class="sheet" id="rcomposer" aria-label="Recomendación"></aside>
     </section>
 
+    <section class="view" id="v-detalle" hidden aria-label="Detalle"><div class="scroll"><div class="gut pf" id="detalle"></div></div></section>
     <section class="view" id="v-perfil" hidden aria-label="Perfil"><div class="scroll"><div class="gut pf" id="perfil"></div></div></section>
     <section class="view" id="v-usuario" hidden aria-label="Perfil de otro tutor"><div class="scroll"><div class="gut pf" id="usuario"></div></div></section>
     <section class="view" id="v-mensajes" hidden aria-label="Mensajes y saludos"><div class="scroll"><div class="gut pf" id="mensajes"></div></div></section>
@@ -597,7 +613,7 @@ function ago(x){
 }
 
 /* ---------- Vistas ---------- */
-const ALLV=['carga','onb','cuenta','ficha','mapa','foro','recomendaciones','perfil','usuario','mensajes','chat','panel'];
+const ALLV=['carga','onb','cuenta','ficha','mapa','foro','recomendaciones','perfil','usuario','mensajes','chat','panel','detalle'];
 const TABS=['mapa','foro','recomendaciones','perfil'];
 let cur='carga',lastTab='mapa',viewArg=null;
 function rawShow(v){ALLV.forEach(k=>{$('#v-'+k).hidden=k!==v});cur=v}
@@ -648,7 +664,7 @@ const KMH=4,MAXWALK=120;
 
 /* ---------- Estado ---------- */
 let user=null,me=null,saved=false,ready=false,isAdmin=false;
-let TUT={},POSTS=[],RECS=[],GREETS={},MSGS={},unsub=[],PSUB={},RSUB={},GSUB={};
+let TUT={},POSTS=[],RECS=[],GREETS={},MSGS={},unsub=[],PSUB={},RSUB={},GSUB={},CHATERR={};
 let myPos=null;
 
 /* ---------- Mascotas ---------- */
@@ -734,7 +750,8 @@ function show(v,arg){
   $$('.tab').forEach(t=>{if(t.dataset.v===lastTab&&saved)t.setAttribute('aria-current','page');else t.removeAttribute('aria-current')});
   closeSheets();
   ({ficha:renderFicha,mapa:enterMap,foro:renderPosts,recomendaciones:renderRecs,perfil:renderPerfil,
-    usuario:()=>renderUsuario(viewArg),mensajes:renderMensajes,chat:()=>renderChat(viewArg),panel:renderPanel}[v]||(()=>{}))();
+    usuario:()=>renderUsuario(viewArg),mensajes:renderMensajes,chat:()=>renderChat(viewArg),panel:renderPanel,
+    detalle:()=>renderDetalle(viewArg)}[v]||(()=>{}))();
   const sc=$('#v-'+v+' .scroll');if(sc)sc.scrollTop=0;
   updateBadge();
 }
@@ -837,7 +854,7 @@ $('#a-reset').addEventListener('click',()=>{
 function clearAll(){
   unsub.forEach(f=>f());unsub=[];
   [PSUB,RSUB,GSUB].forEach(S=>Object.keys(S).forEach(k=>{S[k].off.forEach(f=>f());delete S[k]}));
-  TUT={};POSTS=[];RECS=[];GREETS={};MSGS={};me=null;saved=false;isAdmin=false;myPos=null;selected=null;
+  TUT={};POSTS=[];RECS=[];GREETS={};MSGS={};CHATERR={};me=null;saved=false;isAdmin=false;myPos=null;selected=null;
   clearInterval(walkTimer);walking=null;clearTimeout(fbTimer);
   if(map){map.remove();map=null;circle=null;markers=[]}
 }
@@ -910,17 +927,29 @@ function syncSubs(list,S,base,defs,render){
 function syncChats(){
   const ids=Object.keys(GREETS).filter(k=>GREETS[k].estado==='aceptado');
   Object.keys(GSUB).forEach(k=>{if(!ids.includes(k)){GSUB[k].off.forEach(f=>f());delete GSUB[k]}});
-  ids.forEach(k=>{
-    if(GSUB[k])return;
-    const o={off:[]};GSUB[k]=o;
-    o.off.push(db.collection('saludos').doc(GREETS[k].id).collection('mensajes').orderBy('createdAt','asc').limit(200).onSnapshot(s=>{
-      MSGS[k]=s.docs.map(docData);
+  ids.forEach(k=>subChat(k));
+}
+/* Si la conexión a los mensajes se cae, se vuelve a intentar sola y al abrir el chat. */
+function subChat(k,intento){
+  if(GSUB[k]||!GREETS[k]||GREETS[k].estado!=='aceptado')return;
+  const o={off:[]};GSUB[k]=o;
+  o.off.push(db.collection('saludos').doc(GREETS[k].id).collection('mensajes').orderBy('createdAt','asc').limit(200)
+    .onSnapshot(s=>{
+      delete CHATERR[k];MSGS[k]=s.docs.map(docData);
       if(cur==='chat'&&viewArg===k)paintChat();
       if(cur==='mensajes')renderMensajes();
       updateBadge();
-    },onErr));
-  });
+    },e=>{
+      console.error(e);
+      o.off.forEach(f=>f());delete GSUB[k];
+      CHATERR[k]=(e&&e.code)||'error';
+      if(cur==='chat'&&viewArg===k)paintChat();
+      const n=(intento||0)+1;
+      if(n<=6)setTimeout(()=>subChat(k,n),Math.min(20000,800*Math.pow(2,n)));
+    }));
 }
+function reconnect(){if(user&&saved)syncChats()}
+window.addEventListener('online',reconnect);
 function countVisit(){
   const k='pc.visitas.'+user.uid,v=ls.get(k)||{n:0,last:0};
   if(now()-v.last>30*MIN){v.n++;v.last=now();ls.set(k,v);ev('sesion')}
@@ -1222,7 +1251,7 @@ $('#pick').addEventListener('click',e=>{
   if(e.target.closest('[data-pclose]')){$('#pick').classList.remove('open');return}
   const b=e.target.closest('[data-walk]');if(b)startWalk(+b.dataset.walk);
 });
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&walking){keepAwake(true);if(cur==='mapa')renderWalk()}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)return;reconnect();if(walking){keepAwake(true);if(cur==='mapa')renderWalk()}});
 
 /* ---------- Saludos y chat ---------- */
 const gid=(a,b)=>[a,b].sort().join('_');
@@ -1283,12 +1312,16 @@ $('#mensajes').addEventListener('click',e=>{
 });
 function paintChat(){
   const k=viewArg,m=$('#msgs');if(!m)return;
-  m.innerHTML=(MSGS[k]||[]).map(x=>`<div class="bub${x.uid===user.uid?' me':''}">${esc(x.text)}</div>`).join('');
+  const list=MSGS[k]||[];
+  m.innerHTML=list.length?list.map(x=>`<div class="bub${x.uid===user.uid?' me':''}">${esc(x.text)}</div>`).join('')
+    :(CHATERR[k]?`<p class="note">No pudimos cargar los mensajes (${esc(CHATERR[k])}). Estamos reintentando.</p>`
+      :(MSGS[k]?'<p class="note">Aún no hay mensajes. Escribe el primero.</p>':'<p class="note">Cargando mensajes…</p>'));
   m.scrollTop=m.scrollHeight;
   ls.set(seenKey(k),now());updateBadge();
 }
 function renderChat(uid){
   const t=TUT[uid];if(!t){show('mensajes');return}
+  subChat(uid);
   $('#chat').innerHTML=`<div class="chathead gut"><button class="back" type="button" data-back aria-label="Volver">‹</button><button type="button" class="row grow" data-user="${esc(uid)}"><span class="avs">${avs(t,'md')}</span><span class="grow"><b>${esc(t.tutor||'Tutor')}</b><small>Tutor de ${esc(names(t))}</small></span></button></div>
 <div class="msgs gut" id="msgs"></div>
 <div class="chatin gut"><input class="input" id="chatinp" maxlength="300" placeholder="Escribe un mensaje" aria-label="Mensaje" autocomplete="off"><button class="btn primary sm" type="button" id="chatsend">Enviar</button></div>`;
@@ -1313,15 +1346,15 @@ function autorDe(po){
   const a=po.autor||{};
   return {t:{tutor:a.tutor||'',pets:[{name:a.name||'Mascota',type:a.type||'perro',coat:a.coat||'miel',pat:a.pat||'liso',ageN:a.ageN||1,ageU:a.ageU||'años',conds:[]}]},p:{name:a.name||'Mascota',type:a.type||'perro',coat:a.coat||'miel',pat:a.pat||'liso',ageN:a.ageN||1,ageU:a.ageU||'años',conds:[]}};
 }
-function postHTML(po){
-  const mine=po.uid===user.uid,op=opened.has(po.id),lost=isLost(po),sub=PSUB[po.id]||{likes:new Set(),cm:[]};
+function postHTML(po,full){
+  const mine=po.uid===user.uid,lost=isLost(po),sub=PSUB[po.id]||{likes:new Set(),cm:[]};
   const liked=sub.likes.has(user.uid);
   let head;
   if(po.oficial)head=`<span class="av teamav">${ICON_PAW}</span><div class="who"><b>Equipo Patitas Cercanas</b><small>Publicación oficial</small></div><span class="tag self">Oficial</span>`;
   else{
     const {t,p}=autorDe(po),d=mine?'':distLabel(t);
     const tg=(condsP(p).length&&t.showCond!==false)?`<span class="tag warn">${esc(condsP(p)[0])}</span>`:'';
-    head=`<span class="av">${av(p)}</span><button type="button" class="who" data-user="${esc(po.uid)}"><b>${esc(p.name)}${mine?' (tú)':''}</b><small>${cap(p.type)} · ${ageLong(p)}${d?' · '+d:''}</small></button>${tg}`;
+    head=`<span class="av">${av(p)}</span>${full?`<button type="button" class="who" data-user="${esc(po.uid)}">`:'<div class="who">'}<b>${esc(p.name)}${mine?' (tú)':''}</b><small>${cap(p.type)} · ${ageLong(p)}${d?' · '+d:''}</small>${full?'</button>':'</div>'}${tg}`;
   }
   const cms=sub.cm.map(c=>{
     const {p:q}=autorDe(c),cm=c.uid===user.uid;
@@ -1330,14 +1363,14 @@ function postHTML(po){
   const canEdit=mine||(isAdmin&&po.oficial);
   const own=!canEdit?'':delAsk===po.id?`<div class="confirm">¿Eliminar esta publicación?<button type="button" class="txt danger" data-a="delyes">Sí, eliminar</button><button type="button" class="txt" data-a="delno">Cancelar</button></div>`:
     `<div class="own"><button type="button" class="txt" data-a="edit">Editar</button><button type="button" class="txt danger" data-a="del">Eliminar</button>${lost?'<button type="button" class="txt" data-a="found">Marcar como "Ya apareció"</button>':''}</div>`;
-  return `<article class="post${lost?' lost':''}${po.oficial?' oficial':''}" data-id="${esc(po.id)}">
+  const nc=sub.cm.length,ncTxt=`${nc} ${nc===1?'comentario':'comentarios'}`;
+  return `<article class="post${lost?' lost':''}${po.oficial?' oficial':''}${full?' full':''}" data-id="${esc(po.id)}"${full?'':' data-open="post" role="button" tabindex="0"'}>
 ${lost?'<span class="lostlbl">Mascota perdida · fijada</span>':''}
 <div class="phead">${head}</div>
 <div><span class="cat">${esc(po.cat)}</span> <span class="muted" style="font-size:12px">· ${ago(po.createdAt)}${po.editada?' · editada':''}</span>${po.found?' <span class="tag found">Ya apareció</span>':''}</div>
-<h3>${esc(po.title)}</h3><p>${esc(po.body)}</p>
-<div class="pfoot"><button class="act" type="button" data-a="like" aria-pressed="${liked}">${ICON_HEART}<span>${sub.likes.size}</span></button><button class="act" type="button" data-a="cm" aria-expanded="${op}">${ICON_MSG}<span>${sub.cm.length} ${sub.cm.length===1?'comentario':'comentarios'}</span></button></div>
-${own}
-${op?`<div class="comments">${cms}<div class="cmform"><input class="input" maxlength="200" placeholder="Escribe un comentario" aria-label="Comentario" autocomplete="off"><button class="btn primary sm" type="button" data-a="sendc">Enviar</button></div></div>`:''}
+<h3>${esc(po.title)}</h3><p${full?'':' class="clamp"'}>${esc(po.body)}</p>
+<div class="pfoot"><button class="act" type="button" data-a="like" aria-pressed="${liked}">${ICON_HEART}<span>${sub.likes.size}</span></button><span class="act">${ICON_MSG}<span>${ncTxt}</span></span>${full?'':'<span class="act open">Ver</span>'}</div>
+${full?own+`<div class="comments">${cms}<div class="cmform"><input class="input" maxlength="200" placeholder="Escribe un comentario" aria-label="Comentario" autocomplete="off"><button class="btn primary sm" type="button" data-a="sendc">Enviar</button></div></div>`:''}
 </article>`;
 }
 function keepInputs(root,fn){
@@ -1348,10 +1381,11 @@ function keepInputs(root,fn){
 }
 const renderPosts=later(()=>{
   if(!user||!saved)return;
+  if(cur==='detalle'&&viewArg&&viewArg.t==='post'){renderDetalle(viewArg);return}
   renderCats();
   const list=POSTS.filter(p=>fcat==='Todo'||p.cat===fcat).sort((a,b)=>(isLost(b)-isLost(a))||(ms(b.createdAt)-ms(a.createdAt)));
   keepInputs($('#plist'),()=>{
-    $('#plist').innerHTML=list.length?list.map(postHTML).join(''):`<div class="empty">${fcat==='Todo'?'Aún no hay publicaciones. Escribe la primera con el botón Escribir.':'Aún no hay publicaciones en esta categoría.'}</div>`;
+    $('#plist').innerHTML=list.length?list.map(p=>postHTML(p,false)).join(''):`<div class="empty">${fcat==='Todo'?'Aún no hay publicaciones. Escribe la primera con el botón Escribir.':'Aún no hay publicaciones en esta categoría.'}</div>`;
   });
 });
 $('#fcats').addEventListener('click',e=>{const b=e.target.closest('.chip');if(!b)return;fcat=b.dataset.c;renderPosts()});
@@ -1365,23 +1399,31 @@ function addComment(art){
   db.collection('publicaciones').doc(art.dataset.id).collection('comentarios').add({uid:user.uid,pi:0,text:v,createdAt:TS(),autor:autorSnap(0)})
     .then(()=>ev('comentario')).catch(onErr);
 }
-$('#plist').addEventListener('click',e=>{
-  const b=e.target.closest('button[data-a]');if(!b)return;
-  const art=b.closest('.post'),id=art.dataset.id,po=POSTS.find(p=>p.id===id),a=b.dataset.a,ref=db.collection('publicaciones').doc(id);
+function repaintPost(){if(cur==='detalle')renderDetalle(viewArg);else renderPosts()}
+function repaintRec(){if(cur==='detalle')renderDetalle(viewArg);else renderRecs()}
+function postClick(e){
+  const art=e.target.closest('.post');if(!art)return;
+  const id=art.dataset.id,po=POSTS.find(p=>p.id===id);if(!po)return;
+  const b=e.target.closest('button[data-a]');
+  if(!b){if(art.dataset.open&&!e.target.closest('[data-user]'))show('detalle',{t:'post',id});return}
+  const a=b.dataset.a,ref=db.collection('publicaciones').doc(id);
   if(a==='like'){
     const r=ref.collection('likes').doc(user.uid),liked=PSUB[id]&&PSUB[id].likes.has(user.uid);
     (liked?r.delete():r.set({uid:user.uid,createdAt:TS()})).catch(onErr);return;
   }
-  if(a==='cm'){if(opened.has(id))opened.delete(id);else opened.add(id);renderPosts();return}
   if(a==='sendc'){addComment(art);return}
   if(a==='delcm'){ref.collection('comentarios').doc(b.dataset.c).delete().catch(onErr);return}
   if(a==='edit'){openComposer(id);return}
-  if(a==='del'){delAsk=id;renderPosts();return}
-  if(a==='delno'){delAsk=null;renderPosts();return}
-  if(a==='delyes'){delAsk=null;ref.delete().then(()=>toast('Publicación eliminada')).catch(onErr);renderPosts();return}
+  if(a==='del'){delAsk=id;repaintPost();return}
+  if(a==='delno'){delAsk=null;repaintPost();return}
+  if(a==='delyes'){delAsk=null;ref.delete().then(()=>toast('Publicación eliminada')).catch(onErr);show('foro');return}
   if(a==='found'){ref.set({found:true},{merge:true}).then(()=>toast('¡Qué buena noticia! La publicación dejó de estar fijada.')).catch(onErr);return}
-});
-$('#plist').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('.cmform input')){e.preventDefault();addComment(e.target.closest('.post'))}});
+}
+function postKey(e){
+  if(e.key==='Enter'&&e.target.matches('.cmform input')){e.preventDefault();addComment(e.target.closest('.post'));return}
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('.post[data-open]')){e.preventDefault();show('detalle',{t:'post',id:e.target.dataset.id})}
+}
+['#plist','#detalle'].forEach(s=>{$(s).addEventListener('click',postClick);$(s).addEventListener('keydown',postKey)});
 function openComposer(id){
   cedit=id?POSTS.find(p=>p.id===id):null;
   cdr=cedit?{cat:cedit.cat,pi:cedit.pi||0,oficial:!!cedit.oficial}:{cat:fcat==='Todo'?'Salud':fcat,pi:0,oficial:false};
@@ -1428,9 +1470,9 @@ function reviewsOf(r){
   const ops=((RSUB[r.id]||{}).ops||[]).filter(o=>o.uid!==r.uid);
   return [{uid:r.uid,pi:r.pi||0,stars:r.stars,text:r.text,createdAt:r.createdAt,autor:r.autor,first:true}].concat(ops);
 }
-function recHTML(r){
-  const s=servOf(r.serv),rv=reviewsOf(r),n=rv.length,a=rv.reduce((x,y)=>x+(+y.stars||0),0)/n;
-  const f=rv[0],{p:fp}=autorDe(f),mineFirst=r.uid===user.uid,op=ropen.has(r.id);
+function recHTML(r,full){
+  const rv=reviewsOf(r),n=rv.length,a=rv.reduce((x,y)=>x+(+y.stars||0),0)/n;
+  const f=rv[0],{p:fp}=autorDe(f),mineFirst=r.uid===user.uid;
   const hasMine=rv.some((x,i)=>i>0&&x.uid===user.uid);
   const others=rv.slice(1).map(x=>{
     const {p:q}=autorDe(x),cm=x.uid===user.uid;
@@ -1439,22 +1481,23 @@ function recHTML(r){
   const form=mineFirst?'':`<div class="rvform"><div class="starin" role="radiogroup" aria-label="Tu calificación">${starInHTML(rdraft[r.id]||0)}</div><div class="frow"><input class="input" maxlength="200" placeholder="Deja un comentario" aria-label="Comentario" autocomplete="off"><button class="btn primary sm" type="button" data-a="sendr">${hasMine?'Actualizar':'Enviar'}</button></div></div>`;
   const own=!mineFirst?'':rdelAsk===r.id?`<div class="confirm">¿Eliminar esta recomendación?<button type="button" class="txt danger" data-a="delyes">Sí, eliminar</button><button type="button" class="txt" data-a="delno">Cancelar</button></div>`:
     `<div class="own"><button type="button" class="txt" data-a="edit">Editar</button><button type="button" class="txt danger" data-a="del">Eliminar</button></div>`;
-  return `<article class="rec" data-id="${esc(r.id)}">
-<span class="cat">${esc(s.one)}</span><h3>${esc(r.name)}</h3>
+  const o=n-1,oTxt=`${o} ${o===1?'opinión':'opiniones'}`;
+  return `<article class="rec${full?' full':''}" data-id="${esc(r.id)}"${full?'':' data-open="rec" role="button" tabindex="0"'}>
+<span class="cat">${esc(servOf(r.serv).one)}</span><h3>${esc(r.name)}</h3>
 <p class="rplace">${ICON_PIN}<span>${esc(r.place)}</span></p>
 <div class="rate">${starsHTML(a)}<b>${fmt1(a)}</b><span class="muted">${n} ${n===1?'calificación':'calificaciones'}</span></div>
-<div class="rby"><span class="av">${av(fp)}</span><div><small>Recomendado por ${esc(fp.name)}${mineFirst?' (tú)':''} · ${ago(r.createdAt)}</small><p>${esc(r.text)}</p></div></div>
-<div class="pfoot"><button class="act" type="button" data-a="open" aria-expanded="${op}">${ICON_MSG}<span>${n-1} ${n-1===1?'opinión':'opiniones'}${mineFirst?'':' · Calificar'}</span></button></div>
-${own}
-${op&&(others||form)?`<div class="comments">${others}${form}</div>`:''}
+${full?`<div class="rby"><span class="av">${av(fp)}</span><div><small>Recomendado por ${esc(fp.name)}${mineFirst?' (tú)':''} · ${ago(r.createdAt)}</small><p>${esc(r.text)}</p></div></div>`:''}
+<div class="pfoot"><span class="act">${ICON_MSG}<span>${oTxt}</span></span>${full?'':'<span class="act open">Ver y calificar</span>'}</div>
+${full?own+(others||form?`<div class="comments">${others}${form}</div>`:''):''}
 </article>`;
 }
 const renderRecs=later(()=>{
   if(!user||!saved)return;
+  if(cur==='detalle'&&viewArg&&viewArg.t==='rec'){renderDetalle(viewArg);return}
   $('#rcats').innerHTML=[{k:'todos',many:'Todos'},...SERV].map(s=>`<button type="button" class="chip" data-k="${s.k}" aria-pressed="${rfilter===s.k}">${s.many}</button>`).join('');
   const list=RECS.filter(r=>rfilter==='todos'||r.serv===rfilter);
   keepInputs($('#rlist'),()=>{
-    $('#rlist').innerHTML=list.length?list.map(recHTML).join(''):`<div class="empty">${rfilter==='todos'?'Aún no hay recomendaciones. Agrega la primera con el botón Recomendar.':'Aún no hay recomendaciones de este tipo.'}</div>`;
+    $('#rlist').innerHTML=list.length?list.map(r=>recHTML(r,false)).join(''):`<div class="empty">${rfilter==='todos'?'Aún no hay recomendaciones. Agrega la primera con el botón Recomendar.':'Aún no hay recomendaciones de este tipo.'}</div>`;
   });
 });
 $('#rcats').addEventListener('click',e=>{const b=e.target.closest('.chip');if(!b)return;rfilter=b.dataset.k;renderRecs()});
@@ -1468,21 +1511,35 @@ function sendRate(art){
     .set({uid:user.uid,pi:0,stars,text,createdAt:TS(),autor:autorSnap(0)})
     .then(()=>{ev('calificacion');toast('Calificación publicada')}).catch(onErr);
 }
-$('#rlist').addEventListener('click',e=>{
+function recClick(e){
   const art=e.target.closest('.rec');if(!art)return;
   const id=art.dataset.id,st=e.target.closest('.starin button'),b=e.target.closest('button[data-a]');
   if(st){const n=+st.dataset.s,box=st.parentElement;rdraft[id]=n;box.innerHTML=starInHTML(n);const f=box.querySelector(`[data-s="${n}"]`);if(f)f.focus();return}
-  if(!b)return;
+  if(!b){if(art.dataset.open)show('detalle',{t:'rec',id});return}
   const a=b.dataset.a,ref=db.collection('recomendaciones').doc(id);
   if(a==='sendr'){sendRate(art);return}
   if(a==='edit'){openRcomposer(id);return}
-  if(a==='open'){if(ropen.has(id))ropen.delete(id);else ropen.add(id);renderRecs();return}
   if(a==='delop'){ref.collection('opiniones').doc(user.uid).delete().then(()=>toast('Opinión eliminada')).catch(onErr);return}
-  if(a==='del'){rdelAsk=id;renderRecs();return}
-  if(a==='delno'){rdelAsk=null;renderRecs();return}
-  if(a==='delyes'){rdelAsk=null;ref.delete().then(()=>toast('Recomendación eliminada')).catch(onErr);renderRecs();return}
-});
-$('#rlist').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('.rvform input')){e.preventDefault();sendRate(e.target.closest('.rec'))}});
+  if(a==='del'){rdelAsk=id;repaintRec();return}
+  if(a==='delno'){rdelAsk=null;repaintRec();return}
+  if(a==='delyes'){rdelAsk=null;ref.delete().then(()=>toast('Recomendación eliminada')).catch(onErr);show('recomendaciones');return}
+}
+function recKey(e){
+  if(e.key==='Enter'&&e.target.matches('.rvform input')){e.preventDefault();sendRate(e.target.closest('.rec'));return}
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('.rec[data-open]')){e.preventDefault();show('detalle',{t:'rec',id:e.target.dataset.id})}
+}
+['#rlist','#detalle'].forEach(s=>{$(s).addEventListener('click',recClick);$(s).addEventListener('keydown',recKey)});
+/* ---------- Detalle de una publicación o recomendación ---------- */
+function renderDetalle(a){
+  if(!a){show(lastTab);return}
+  const esPost=a.t==='post';
+  const item=esPost?POSTS.find(p=>p.id===a.id):RECS.find(r=>r.id===a.id);
+  if(!item){show(lastTab);return}
+  keepInputs($('#detalle'),()=>{
+    $('#detalle').innerHTML=`<div class="sub"><button class="back" type="button" data-back aria-label="Volver">‹</button><h1>${esPost?'Publicación':'Recomendación'}</h1></div>`+
+      (esPost?postHTML(item,true):recHTML(item,true));
+  });
+}
 function openRcomposer(id){
   redit=id?RECS.find(r=>r.id===id):null;
   rdr=redit?{serv:redit.serv,stars:redit.stars}:{serv:'vet',stars:0};
